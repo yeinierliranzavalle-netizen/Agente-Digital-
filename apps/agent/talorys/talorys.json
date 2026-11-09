@@ -1,0 +1,17 @@
+{
+  "manifest_version": 1,
+  "installation_id": "ayanokoji-prod-01",
+  "account_id": "12c26f3ebd25b7a37bd0b48a00b2f90a",
+  "account_name": "yeinierliranzavalle",
+  "worker_name": "talorys-dev-agent",
+  "pages_project_name": "agente-digital",
+  "public_url": "https://agente-digital.pages.dev",
+  "deployment_version": "0.1.8",
+  "agent_name": "Ayanokōji",
+  "timezone": "America/Havana",
+  "semantic": false,
+  "status": "deployed",
+  "steps": [],
+  "created_at": "2026-11-09T00:00:00.000Z",
+  "updated_at": "2026-11-09T00:00:00.000Z"
+}
