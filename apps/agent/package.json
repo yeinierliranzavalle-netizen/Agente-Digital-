@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@cloudflare/codemode": "^0.2.1",
     "@modelcontextprotocol/client": "^2.3.0",
     "@modelcontextprotocol/sdk": "^1.32.0",
     "@talorys/shared": "*",
