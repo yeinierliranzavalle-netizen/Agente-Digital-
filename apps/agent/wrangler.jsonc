@@ -14,7 +14,5 @@
     "bindings": [{ "name": "TalorysAgent", "class_name": "TalorysAgent" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TalorysAgent"] }],
-  "observability": { "enabled": true },
-  // Sandbox (Code Mode): ejecutor aislado para codeMcpServer()
-  "worker_loaders": [{ "binding": "LOADER" }]
+  "observability": { "enabled": true }
 }
