@@ -123,6 +123,22 @@ export class TalorysAgent extends Agent<Env, AgentState> {
     this.refreshUnread();
   }
 
+  async proponerAccion(accion: { tool: string; params: any; razon: string }) {
+  const critic = await this.subAgent(CriticAgent, 'consejero'); // Crea o recupera al consejero
+  const veredicto = await critic.eval(
+    `Ejecutar herramienta "${accion.tool}" con params ${JSON.stringify(accion.params)}`,
+    accion.razon
+  );
+
+  if (veredicto.veredicto === 'rechazado') {
+    return { ok: false, razon: veredicto.justificacion };
+  }
+
+  // Si es aprobado, ejecuta la herramienta real (ej. vía cf-tool)
+  // ... tu lógica de ejecución ...
+  return { ok: true, razon: veredicto.justificacion };
+  }
+
   /** "Run now" from the UI: executes immediately without touching the schedule. */
   async runAutomationNow(id: string) {
     const run = await this.services.automations.runNow(id, (a) => this.executeAutomation(a));
