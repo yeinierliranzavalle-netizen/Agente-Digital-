@@ -14,6 +14,7 @@ import { semanticExtensions } from "../semantic";
 import { AppError } from "../api/errors";
 import { semanticNeighbors } from "../semantic/neighbors";
 import { CLEF_MODEL, type ClefRun } from "../memory/conflict";
+import { elegirModelo } from "../ai/workers-ai";
 
 interface AgentState {
   /** Unread notifications, kept in agent state for cheap polling. */
@@ -87,13 +88,17 @@ export class TalorysAgent extends Agent<Env, AgentState> {
     return Response.json({ error: { code: "NOT_FOUND", message: "Not found" } }, { status: 404 });
   }
 
-  /** Chooses the AI provider. The mock is only used in local development or explicit demo mode. */
-  aiProvider(): AIProvider | null {
+  /**
+   * Chooses the AI provider. The mock is only used in local development or explicit demo mode.
+   * Si se pasa un mensaje, enruta al modelo adecuado (chat vs trabajo).
+   */
+  aiProvider(mensaje?: string): AIProvider | null {
     const settings = this.services.settings.get();
     if (settings.demoMode) return new MockAIProvider();
     if (this.env.TALORYS_ENV === "development" && this.env.TALORYS_MOCK_AI === "1") return new MockAIProvider();
     if (!this.env.AI) return null;
-    return new CloudflareWorkersAIProvider(this.env.AI, settings.model);
+    const modelo = mensaje ? elegirModelo(mensaje) : settings.model;
+    return new CloudflareWorkersAIProvider(this.env.AI, modelo);
   }
 
   /** Clef for the memory-history AI check: only with real Workers AI (not mock AI or demo mode). */
@@ -103,10 +108,14 @@ export class TalorysAgent extends Agent<Env, AgentState> {
     return (request, signal) => ai.run(CLEF_MODEL, { ...request }, { signal });
   }
 
-  runner(): AgentRunner {
+  /**
+   * Crea un AgentRunner. Si se pasa un mensaje, enruta al modelo adecuado.
+   * Llamar sin mensaje usa el modelo por defecto de settings.
+   */
+  runner(mensaje?: string): AgentRunner {
     return new AgentRunner(
       this.services,
-      this.aiProvider(),
+      this.aiProvider(mensaje),
       semanticExtensions(this.services, this.env, (work) => this.ctx.waitUntil(work)),
       this.services.mcp.chatTools(),
     );
@@ -124,19 +133,17 @@ export class TalorysAgent extends Agent<Env, AgentState> {
   }
 
   async proponerAccion(accion: { tool: string; params: any; razon: string }) {
-  const critic = await this.subAgent(CriticAgent, 'consejero'); // Crea o recupera al consejero
-  const veredicto = await critic.eval(
-    `Ejecutar herramienta "${accion.tool}" con params ${JSON.stringify(accion.params)}`,
-    accion.razon
-  );
+    const critic = await this.subAgent(CriticAgent, 'consejero');
+    const veredicto = await critic.eval(
+      `Ejecutar herramienta "${accion.tool}" con params ${JSON.stringify(accion.params)}`,
+      accion.razon
+    );
 
-  if (veredicto.veredicto === 'rechazado') {
-    return { ok: false, razon: veredicto.justificacion };
-  }
+    if (veredicto.veredicto === 'rechazado') {
+      return { ok: false, razon: veredicto.justificacion };
+    }
 
-  // Si es aprobado, ejecuta la herramienta real (ej. vía cf-tool)
-  // ... tu lógica de ejecución ...
-  return { ok: true, razon: veredicto.justificacion };
+    return { ok: true, razon: veredicto.justificacion };
   }
 
   /** "Run now" from the UI: executes immediately without touching the schedule. */
@@ -151,7 +158,6 @@ export class TalorysAgent extends Agent<Env, AgentState> {
     const settings = s.settings.get();
     switch (a.kind) {
       case "reminder": {
-        // Simple reminders never use AI.
         s.notifications.create({ title: "Reminder", body: a.message || a.name, automation_id: a.id });
         return { status: "success", result: "Reminder delivered" };
       }
@@ -177,9 +183,9 @@ export class TalorysAgent extends Agent<Env, AgentState> {
         if (!s.usage.canRunScheduledAi(settings.limits)) return skipForBudget(s, a);
         let text: string;
         try {
-          text = await this.runner().runScheduledPrompt(a.message);
+          // Enrutamiento: pasamos el mensaje de la automatización para que use el modelo de trabajo.
+          text = await this.runner(a.message).runScheduledPrompt(a.message);
         } catch (error) {
-          // The budget ran out while this run waited (another run or chat took the last request).
           if (error instanceof AppError && error.code === "AI_LIMIT_REACHED") return skipForBudget(s, a);
           throw error;
         }

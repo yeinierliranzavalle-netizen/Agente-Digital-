@@ -1,144 +1,104 @@
-import { generateText, streamText, type ToolSet } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
-import type { AgentEvent, AIProvider, GenerateRequest, ToolRequest } from "./provider";
-import { classifyAiError, withUsage } from "./provider";
-import { meteredBinding, stepUsage, type StepMeter } from "./workers-ai-usage";
+import { createParser } from "eventsource-parser";
+import { estimateTokens, modelUsage, tokenCount, tokens, type Usage } from "./provider";
+
+export interface StepMeter {
+  inputEstimate: number;
+  input?: number;
+  output?: number;
+  cached?: number;
+  /** Text and reasoning characters seen in raw responses, including output the SDK dropped on an error. */
+  outputChars?: number;
+}
+
+interface RawChunk {
+  response?: unknown;
+  choices?: { delta?: { content?: unknown; reasoning_content?: unknown } }[];
+  usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; prompt_tokens_details?: { cached_tokens?: unknown } };
+}
+
+function capture(meter: StepMeter, response: unknown): void {
+  const chunk = response as RawChunk | null;
+  const delta = chunk?.choices?.[0]?.delta;
+  for (const text of [chunk?.response, delta?.content, delta?.reasoning_content]) {
+    if (typeof text === "string") meter.outputChars = (meter.outputChars ?? 0) + text.length;
+  }
+  const usage = chunk?.usage;
+  if (!usage) return;
+  meter.input = tokenCount(usage.prompt_tokens) ?? meter.input;
+  meter.output = tokenCount(usage.completion_tokens) ?? meter.output;
+  meter.cached = tokenCount(usage.prompt_tokens_details?.cached_tokens) ?? meter.cached;
+}
+
+/** Observe before workers-ai-provider turns missing usage fields into reported zeroes. */
+export function meteredBinding(binding: Ai, steps: StepMeter[]): Ai {
+  return new Proxy(binding, {
+    get(target, key) {
+      if (key !== "run") {
+        const value = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async (...args: Parameters<Ai["run"]>) => {
+        const inputs = args[1] as { messages?: unknown; tools?: unknown };
+        const meter: StepMeter = {
+          // The actual SDK-built prompt includes previous tool calls/results and tool schemas.
+          inputEstimate: estimateTokens(JSON.stringify({ messages: inputs.messages, tools: inputs.tools })),
+        };
+        steps.push(meter);
+        const response = await target.run(...args);
+        if (!(response instanceof ReadableStream)) {
+          capture(meter, response);
+          return response;
+        }
+        const decoder = new TextDecoder();
+        let observing = true;
+        const parser = createParser({
+          maxBufferSize: 1024 * 1024,
+          onError: (error) => {
+            if (error.type === "max-buffer-size-exceeded") observing = false;
+          },
+          onEvent: ({ data }) => {
+            if (data === "[DONE]") return;
+            try { capture(meter, JSON.parse(data)); } catch { /* Accounting must not change inference parsing. */ }
+          },
+        });
+        return response.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) {
+            if (observing) parser.feed(decoder.decode(chunk, { stream: true }));
+            controller.enqueue(chunk);
+          },
+          flush() {
+            if (observing) parser.feed(decoder.decode());
+            parser.reset();
+          },
+        }));
+      };
+    },
+  });
+}
+
+/** `outputChars` is what the SDK surfaced; the raw count wins when the SDK dropped output on an error. */
+export function stepUsage(model: string, meter: StepMeter, outputChars: number): Usage {
+  const outputEstimate = estimateTokens(Math.max(outputChars, meter.outputChars ?? 0));
+  return modelUsage(model, true, tokens(meter.input, meter.inputEstimate), tokens(meter.output, outputEstimate), meter.cached);
+}
+
+// ============================================================
+// ENRUTAMIENTO DE MODELOS (nuevo)
+// ============================================================
+// Modelo para chat: personalidad, criterio, conversación.
+// Modelo para trabajo: tool calling, código, orquestación.
+export const MODELO_CHAT = "@cf/qwen/qwen3.8-27b";
+export const MODELO_TRABAJO = "@cf/zai-org/glm-5.3-flash";
 
 /**
- * Cloudflare Workers AI through the AI SDK's official Workers AI provider.
- * Reasoning ("thinking") is disabled by default to keep Neuron usage low.
+ * Decide qué modelo usar según el mensaje del usuario y si es una ejecución programada.
+ * Si detecta intención de trabajo (herramientas, código, deploy), usa el modelo de trabajo.
+ * Por defecto, usa el modelo de chat (personalidad).
  */
-export class CloudflareWorkersAIProvider implements AIProvider {
-  readonly id = "workers-ai";
-  readonly billable = true;
-
-  constructor(
-    private readonly binding: Ai,
-    readonly model: string,
-  ) {}
-
-  private createModel(steps: StepMeter[]) {
-    const workersai = createWorkersAI({ binding: meteredBinding(this.binding, steps) });
-    return workersai(this.model as Parameters<typeof workersai>[0], {
-      chat_template_kwargs: { enable_thinking: false },
-    });
+export function elegirModelo(mensaje: string, esAutomatizacion: boolean = false): string {
+  if (esAutomatizacion) return MODELO_TRABAJO;
+  if (/cloudflare_execute|run_code|generate_code|deploy_worker|list_workers|get_worker|get_worker_content|list_kv|get_kv|put_kv|list_d1|query_d1|list_pages|get_usage|generate_image|store_image|get_image|list_images/i.test(mensaje)) {
+    return MODELO_TRABAJO;
   }
-
-  async generate(req: GenerateRequest) {
-    const steps: StepMeter[] = [];
-    try {
-      const result = await generateText({
-        model: this.createModel(steps),
-        instructions: req.system,
-        messages: req.messages,
-        maxOutputTokens: req.maxOutputTokens,
-        temperature: req.temperature,
-        abortSignal: req.signal,
-        // Retries would be model calls the daily budget cannot see; the UI offers Retry instead.
-        maxRetries: 0,
-      });
-      return {
-        text: result.text,
-        usage: stepUsage(this.model, steps[0]!, result.text.length + (result.reasoningText?.length ?? 0)),
-      };
-    } catch (error) {
-      // A call that reached the binding is metered even when it fails (docs/architecture.md).
-      throw withUsage(classifyAiError(error), steps[0] && stepUsage(this.model, steps[0], 0));
-    }
-  }
-
-  async *stream(req: GenerateRequest): AsyncIterable<AgentEvent> {
-    yield* this.generateWithTools({ ...req, tools: [], maxIterations: 1, toolBudgetExhausted: () => true });
-  }
-
-  async *generateWithTools(req: ToolRequest): AsyncIterable<AgentEvent> {
-    const tools: ToolSet = {};
-    for (const t of req.tools) {
-      tools[t.name] = {
-        description: t.description,
-        inputSchema: t.inputSchema,
-        execute: async (input: unknown, options: { toolCallId: string }) => t.execute(input, options.toolCallId),
-      } as ToolSet[string];
-    }
-    const hasTools = req.tools.length > 0;
-    let streamError: unknown = null;
-    const steps: StepMeter[] = [];
-    let stepIndex = 0;
-    let stepOutputChars = 0;
-    const result = streamText({
-      model: this.createModel(steps),
-      instructions: req.system,
-      messages: req.messages,
-      maxOutputTokens: req.maxOutputTokens,
-      temperature: req.temperature,
-      abortSignal: req.signal,
-      // Retries would be model calls the daily budget cannot see; the UI offers Retry instead.
-      maxRetries: 0,
-      ...(hasTools
-        ? {
-            tools,
-            // Every further step is another model call: stop at the step cap or when the daily budget is spent.
-            stopWhen: ({ steps }: { steps: unknown[] }) =>
-              steps.length >= req.maxIterations || (req.reserveNextStep ? !req.reserveNextStep() : false),
-            // On the last allowed step, or once the tool budget is spent, force a plain-text answer.
-            prepareStep: ({ stepNumber }: { stepNumber: number }) =>
-              stepNumber >= req.maxIterations - 1 || req.toolBudgetExhausted() ? { toolChoice: "none" as const } : {},
-          }
-        : {}),
-      onError: ({ error }: { error: unknown }) => {
-        streamError = error;
-      },
-    });
-
-    let failure: unknown = null;
-    try {
-      for await (const part of result.fullStream) {
-        switch (part.type) {
-          case "reasoning-delta":
-            stepOutputChars += part.text.length;
-            break;
-          case "text-delta":
-            stepOutputChars += part.text.length;
-            if (part.text) yield { type: "text", delta: part.text };
-            break;
-          case "tool-call":
-            stepOutputChars += JSON.stringify({ name: part.toolName, input: part.input }).length;
-            yield { type: "tool-start", id: part.toolCallId, name: part.toolName, input: part.input };
-            break;
-          case "tool-result":
-            yield { type: "tool-end", id: part.toolCallId, name: part.toolName, output: part.output };
-            break;
-          case "tool-error":
-            yield {
-              type: "tool-end",
-              id: part.toolCallId,
-              name: part.toolName,
-              output: null,
-              error: part.error instanceof Error ? part.error.message : String(part.error),
-            };
-            break;
-          case "finish-step":
-            // An "error" step still ran: its prompt was processed and any received counts are kept.
-            if (steps[stepIndex]) yield { type: "usage", usage: stepUsage(this.model, steps[stepIndex]!, stepOutputChars) };
-            stepIndex++;
-            stepOutputChars = 0;
-            break;
-          case "error":
-            throw part.error;
-          default:
-            break;
-        }
-      }
-    } catch (error) {
-      failure = error;
-    }
-    failure ??= streamError;
-    // Every binding call that started and has no finish-step yet is metered before any error is
-    // rethrown: after a quiet abort, a stream error or a failed call (docs/architecture.md).
-    for (; stepIndex < steps.length; stepIndex++) {
-      yield { type: "usage", usage: stepUsage(this.model, steps[stepIndex]!, stepOutputChars) };
-      stepOutputChars = 0;
-    }
-    if (failure) throw classifyAiError(failure);
-  }
+  return MODELO_CHAT;
 }
