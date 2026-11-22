@@ -17,7 +17,6 @@ import { CLEF_MODEL, type ClefRun } from "../memory/conflict";
 import { elegirModelo } from "../ai/workers-ai";
 
 interface AgentState {
-  /** Unread notifications, kept in agent state for cheap polling. */
   unread: number;
 }
 
@@ -27,15 +26,10 @@ interface AutomationPayload {
 
 const api = createApi();
 
-/**
- * The owner's personal agent. Exactly one instance exists per deployment
- * ("personal-agent"); it owns all data in its SQLite-backed Durable Object.
- */
 export class TalorysAgent extends Agent<Env, AgentState> {
   override initialState: AgentState = { unread: 0 };
 
   private _services: Services | null = null;
-  /** In-flight chat turns by conversation, for cancellation. */
   readonly activeRuns = new Map<string, AbortController>();
 
   get services(): Services {
@@ -45,9 +39,7 @@ export class TalorysAgent extends Agent<Env, AgentState> {
           const s = await this.schedule<AutomationPayload>(at, "runAutomation", { automationId });
           return s.id;
         },
-        cancel: async (id) => {
-          await this.cancelSchedule(id);
-        },
+        cancel: async (id) => { await this.cancelSchedule(id); },
         exists: async (id) => (await this.getScheduleById(id)) !== undefined,
       };
       this._services = createServices(
@@ -80,42 +72,31 @@ export class TalorysAgent extends Agent<Env, AgentState> {
     return api.fetch(request, { agent: this, env: this.env });
   }
 
-  /**
-   * Talorys has no sub-agents. Without this, the SDK forwards any `/sub/{class}/{name}/...`
-   * request to a fresh facet with its own empty database, bypassing login rate limits.
-   */
   override async onBeforeSubAgent(): Promise<Response> {
     return Response.json({ error: { code: "NOT_FOUND", message: "Not found" } }, { status: 404 });
   }
 
-  /**
-   * Chooses the AI provider. The mock is only used in local development or explicit demo mode.
-   * Si se pasa un mensaje, enruta al modelo adecuado (chat vs trabajo).
-   */
-  aiProvider(mensaje?: string): AIProvider | null {
+  // Enrutamiento: si recibe un mensaje, elige el modelo adecuado.
+  aiProvider(mensaje?: string, esAutomatizacion: boolean = false): AIProvider | null {
     const settings = this.services.settings.get();
     if (settings.demoMode) return new MockAIProvider();
     if (this.env.TALORYS_ENV === "development" && this.env.TALORYS_MOCK_AI === "1") return new MockAIProvider();
     if (!this.env.AI) return null;
-    const modelo = mensaje ? elegirModelo(mensaje) : settings.model;
+    const modelo = mensaje ? elegirModelo(mensaje, esAutomatizacion) : settings.model;
     return new CloudflareWorkersAIProvider(this.env.AI, modelo);
   }
 
-  /** Clef for the memory-history AI check: only with real Workers AI (not mock AI or demo mode). */
   clefRun(): ClefRun | null {
     if (!this.env.AI || !(this.aiProvider() instanceof CloudflareWorkersAIProvider)) return null;
     const ai = this.env.AI;
     return (request, signal) => ai.run(CLEF_MODEL, { ...request }, { signal });
   }
 
-  /**
-   * Crea un AgentRunner. Si se pasa un mensaje, enruta al modelo adecuado.
-   * Llamar sin mensaje usa el modelo por defecto de settings.
-   */
-  runner(mensaje?: string): AgentRunner {
+  // El runner ahora acepta el mensaje y si es automatización.
+  runner(mensaje?: string, esAutomatizacion: boolean = false): AgentRunner {
     return new AgentRunner(
       this.services,
-      this.aiProvider(mensaje),
+      this.aiProvider(mensaje, esAutomatizacion),
       semanticExtensions(this.services, this.env, (work) => this.ctx.waitUntil(work)),
       this.services.mcp.chatTools(),
     );
@@ -126,7 +107,6 @@ export class TalorysAgent extends Agent<Env, AgentState> {
     if (unread !== this.state.unread) this.setState({ unread });
   }
 
-  /** Scheduled callback invoked by the Agents SDK (Durable Object alarm). */
   async runAutomation(payload: AutomationPayload, schedule: { id: string }): Promise<void> {
     await this.services.automations.fire(payload.automationId, schedule.id, (a) => this.executeAutomation(a));
     this.refreshUnread();
@@ -138,15 +118,12 @@ export class TalorysAgent extends Agent<Env, AgentState> {
       `Ejecutar herramienta "${accion.tool}" con params ${JSON.stringify(accion.params)}`,
       accion.razon
     );
-
     if (veredicto.veredicto === 'rechazado') {
       return { ok: false, razon: veredicto.justificacion };
     }
-
     return { ok: true, razon: veredicto.justificacion };
   }
 
-  /** "Run now" from the UI: executes immediately without touching the schedule. */
   async runAutomationNow(id: string) {
     const run = await this.services.automations.runNow(id, (a) => this.executeAutomation(a));
     this.refreshUnread();
@@ -183,8 +160,8 @@ export class TalorysAgent extends Agent<Env, AgentState> {
         if (!s.usage.canRunScheduledAi(settings.limits)) return skipForBudget(s, a);
         let text: string;
         try {
-          // Enrutamiento: pasamos el mensaje de la automatización para que use el modelo de trabajo.
-          text = await this.runner(a.message).runScheduledPrompt(a.message);
+          // Pasamos el mensaje y el flag de automatización para que use GLM-5.3 Flash.
+          text = await this.runner(a.message, true).runScheduledPrompt(a.message);
         } catch (error) {
           if (error instanceof AppError && error.code === "AI_LIMIT_REACHED") return skipForBudget(s, a);
           throw error;
