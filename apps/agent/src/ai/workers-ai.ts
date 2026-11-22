@@ -6,7 +6,6 @@ export interface StepMeter {
   input?: number;
   output?: number;
   cached?: number;
-  /** Text and reasoning characters seen in raw responses, including output the SDK dropped on an error. */
   outputChars?: number;
 }
 
@@ -29,7 +28,6 @@ function capture(meter: StepMeter, response: unknown): void {
   meter.cached = tokenCount(usage.prompt_tokens_details?.cached_tokens) ?? meter.cached;
 }
 
-/** Observe before workers-ai-provider turns missing usage fields into reported zeroes. */
 export function meteredBinding(binding: Ai, steps: StepMeter[]): Ai {
   return new Proxy(binding, {
     get(target, key) {
@@ -40,7 +38,6 @@ export function meteredBinding(binding: Ai, steps: StepMeter[]): Ai {
       return async (...args: Parameters<Ai["run"]>) => {
         const inputs = args[1] as { messages?: unknown; tools?: unknown };
         const meter: StepMeter = {
-          // The actual SDK-built prompt includes previous tool calls/results and tool schemas.
           inputEstimate: estimateTokens(JSON.stringify({ messages: inputs.messages, tools: inputs.tools })),
         };
         steps.push(meter);
@@ -53,9 +50,7 @@ export function meteredBinding(binding: Ai, steps: StepMeter[]): Ai {
         let observing = true;
         const parser = createParser({
           maxBufferSize: 1024 * 1024,
-          onError: (error) => {
-            if (error.type === "max-buffer-size-exceeded") observing = false;
-          },
+          onError: (error) => { if (error.type === "max-buffer-size-exceeded") observing = false; },
           onEvent: ({ data }) => {
             if (data === "[DONE]") return;
             try { capture(meter, JSON.parse(data)); } catch { /* Accounting must not change inference parsing. */ }
@@ -76,29 +71,21 @@ export function meteredBinding(binding: Ai, steps: StepMeter[]): Ai {
   });
 }
 
-/** `outputChars` is what the SDK surfaced; the raw count wins when the SDK dropped output on an error. */
 export function stepUsage(model: string, meter: StepMeter, outputChars: number): Usage {
   const outputEstimate = estimateTokens(Math.max(outputChars, meter.outputChars ?? 0));
   return modelUsage(model, true, tokens(meter.input, meter.inputEstimate), tokens(meter.output, outputEstimate), meter.cached);
 }
 
 // ============================================================
-// ENRUTAMIENTO DE MODELOS (nuevo)
+// ENRUTAMIENTO DE MODELOS (NUEVO)
 // ============================================================
-// Modelo para chat: personalidad, criterio, conversación.
-// Modelo para trabajo: tool calling, código, orquestación.
-export const MODELO_CHAT = "@cf/qwen/qwen3.8-27b";
-export const MODELO_TRABAJO = "@cf/zai-org/glm-5.3-flash";
+export const MODELO_CHAT = "@cf/qwen/qwen3.8-27b"; // Personalidad, criterio, conversación
+export const MODELO_TRABAJO = "@cf/zai-org/glm-5.3-flash"; // Tool calling, código, orquestación
 
-/**
- * Decide qué modelo usar según el mensaje del usuario y si es una ejecución programada.
- * Si detecta intención de trabajo (herramientas, código, deploy), usa el modelo de trabajo.
- * Por defecto, usa el modelo de chat (personalidad).
- */
 export function elegirModelo(mensaje: string, esAutomatizacion: boolean = false): string {
   if (esAutomatizacion) return MODELO_TRABAJO;
   if (/cloudflare_execute|run_code|generate_code|deploy_worker|list_workers|get_worker|get_worker_content|list_kv|get_kv|put_kv|list_d1|query_d1|list_pages|get_usage|generate_image|store_image|get_image|list_images/i.test(mensaje)) {
     return MODELO_TRABAJO;
   }
   return MODELO_CHAT;
-}
+          }
