@@ -1,3 +1,6 @@
+import { createWorkersAI } from "workers-ai-provider";
+import { streamText, generateText } from "ai";
+import type { AIProvider } from "./provider";
 import { createParser } from "eventsource-parser";
 import { estimateTokens, modelUsage, tokenCount, tokens, type Usage } from "./provider";
 
@@ -77,6 +80,43 @@ export function stepUsage(model: string, meter: StepMeter, outputChars: number):
 }
 
 // ============================================================
+// LA CLASE QUE FALTABA (Reconstruida)
+// ============================================================
+export class CloudflareWorkersAIProvider implements AIProvider {
+  private workersai: ReturnType<typeof createWorkersAI>;
+
+  constructor(private binding: Ai, private model: string) {
+    this.workersai = createWorkersAI({ binding });
+  }
+
+  async *chat(params: any): AsyncGenerator<any> {
+    const steps: StepMeter[] = [];
+    const meteredAi = meteredBinding(this.binding, steps);
+    const meteredProvider = createWorkersAI({ binding: meteredAi });
+    
+    const result = streamText({
+      model: meteredProvider(this.model),
+      ...params
+    });
+
+    for await (const chunk of result.fullStream) {
+      yield chunk;
+    }
+  }
+
+  async generateText(params: any) {
+    const steps: StepMeter[] = [];
+    const meteredAi = meteredBinding(this.binding, steps);
+    const meteredProvider = createWorkersAI({ binding: meteredAi });
+    
+    return await generateText({
+      model: meteredProvider(this.model),
+      ...params
+    });
+  }
+}
+
+// ============================================================
 // ENRUTAMIENTO DE MODELOS (NUEVO)
 // ============================================================
 export const MODELO_CHAT = "@cf/qwen/qwen3.8-27b"; // Personalidad, criterio, conversación
@@ -88,4 +128,4 @@ export function elegirModelo(mensaje: string, esAutomatizacion: boolean = false)
     return MODELO_TRABAJO;
   }
   return MODELO_CHAT;
-          }
+                   }
