@@ -14,7 +14,7 @@ import { semanticExtensions } from "../semantic";
 import { AppError } from "../api/errors";
 import { semanticNeighbors } from "../semantic/neighbors";
 import { CLEF_MODEL, type ClefRun } from "../memory/conflict";
-import { elegirModelo } from "../ai/workers-ai";
+import { elegirModelo } from "../ai/workers-ai"; // <-- IMPORTANTE
 
 interface AgentState {
   unread: number;
@@ -92,7 +92,6 @@ export class TalorysAgent extends Agent<Env, AgentState> {
     return (request, signal) => ai.run(CLEF_MODEL, { ...request }, { signal });
   }
 
-  // El runner ahora acepta el mensaje y si es automatización.
   runner(mensaje?: string, esAutomatizacion: boolean = false): AgentRunner {
     return new AgentRunner(
       this.services,
