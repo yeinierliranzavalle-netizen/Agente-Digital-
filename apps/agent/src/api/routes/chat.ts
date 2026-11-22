@@ -83,7 +83,8 @@ chatRoutes.post("/chat", async (c) => {
     let conversationId: string | undefined = input.conversation_id;
     try {
       await writer.write(encoder.encode(`: stream open\n\n`));
-      for await (const event of agent.runner().chat({
+      // EL ÚNICO CAMBIO: Pasamos input.message a runner() para que elija el modelo correcto.
+      for await (const event of agent.runner(input.message).chat({
         conversationId: input.conversation_id,
         message: input.message,
         retry: input.retry,
