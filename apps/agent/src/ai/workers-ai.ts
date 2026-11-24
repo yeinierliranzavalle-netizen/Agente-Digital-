@@ -134,20 +134,21 @@ export class CloudflareWorkersAIProvider implements AIProvider {
     }
     failure ??= streamError;
     // Every binding call that started and has no finish-step yet is metered before any error is
-    // rethrown: after a quiet abort, a stream error or a failed call (docs/architecture.md).
+    // rethrown: after a quiet abort, a failed call (docs/architecture.md).
     for (; stepIndex < steps.length; stepIndex++) {
       yield { type: "usage", usage: stepUsage(this.model, steps[stepIndex]!, stepOutputChars) };
       stepOutputChars = 0;
     }
     if (failure) throw classifyAiError(failure);
   }
-      // ============================================================
+} // <--- ESTA ES LA LLAVE QUE FALTABA
+
+// ============================================================
 // ENRUTAMIENTO DE MODELOS (NUEVO)
 // ============================================================
-export const MODELO_CHAT = "@cf/zai-org/glm-4.7-flash"; // El modelo por defecto de Talorys, estable y gratuito
-export const MODELO_TRABAJO = "@cf/zai-org/glm-4.7-flash"; // Usamos el mismo por ahora, para no romper nada
+export const MODELO_CHAT = "@cf/zai-org/glm-4.7-flash";
+export const MODELO_TRABAJO = "@cf/zai-org/glm-4.7-flash";
 
 export function elegirModelo(mensaje: string, esAutomatizacion: boolean = false): string {
-  // Por ahora, usa el mismo modelo para todo. El enrutamiento real lo activaremos cuando el chat básico funcione.
   return MODELO_CHAT;
-}
+  }
